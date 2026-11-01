@@ -1,0 +1,5 @@
+# Runtime dependencies, exact pins. The image and CI install from this file,
+# so what you test locally is what runs in the cluster.
+fastapi==0.162.0
+uvicorn==0.54.0
+prometheus-client==0.26.0
