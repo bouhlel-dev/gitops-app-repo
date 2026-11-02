@@ -90,10 +90,16 @@ Three details carry weight:
 - **No signing key exists.** Keyless means the identity is the workflow: GitHub
   hands the run an OIDC token, Fulcio turns it into a certificate valid for
   minutes whose subject is `…/.github/workflows/ci.yml@refs/heads/main`, and that
-  subject -- not a key file -- is what `config-repo`'s ClusterPolicy requires. The
-  consequence to know about: the signature is stored in GHCR as an OCI artifact
-  and recorded in Sigstore's public Rekor log, so the image digest and this
-  repository's identity are published.
+  subject -- not a key file -- is what `config-repo`'s `ImageValidatingPolicy`
+  requires. The consequence to know about: the signature is stored in GHCR and
+  recorded in Sigstore's public Rekor log, so the image digest and this
+  repository's identity are published. One detail of that storage cost a whole
+  debugging cycle: cosign v3 writes a signature as an OCI 1.1 *referrer*, GHCR
+  does not implement the Referrers API, and cosign falls back to a tag named
+  `sha256-<digest>` in this same repository. The newer Kyverno policy API follows
+  that tag; the older `ClusterPolicy` `verifyImages` rule looks for the pre-v3
+  nested `.sig` repository, finds nothing, and denies an image that
+  `cosign verify` accepted seconds earlier.
 
 CI never runs `kubectl`. The only write it performs against a cluster is a commit
 to a git repository.
