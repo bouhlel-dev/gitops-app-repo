@@ -74,9 +74,11 @@ interpreter that ships.
 | Build | `docker buildx build` with `GIT_SHA` as a build arg | Dockerfile faults, a layer that cannot be produced |
 | Scan | Trivy at the pinned version, `--severity HIGH,CRITICAL --ignore-unfixed` | any fixable HIGH or CRITICAL in the image |
 | Publish | push `ghcr.io/bouhlel-dev/gitops-demo:<sha>` with `GITHUB_TOKEN` | nothing above it passed |
+| Sign | `cosign sign` the pushed **digest**, keyless, with the runner's OIDC token | Sigstore being unreachable, a runner with no `id-token: write` |
+| Verify | `cosign verify` the digest with the issuer and the workflow identity, the same two strings the in-cluster policy checks | a signature GHCR will not serve back |
 | Promote | `kustomize edit set image` in a checkout of config-repo, re-render and *grep the output* for the tag, commit, open a PR, squash-merge it | the render guard |
 
-Two details carry weight:
+Three details carry weight:
 
 - **The tag is the commit, never only `latest`.** `${GITHUB_SHA::7}` is also
   baked into `APP_VERSION`, so a running pod reports which commit produced it and
@@ -85,6 +87,13 @@ Two details carry weight:
   greps for `image: …:<sha>`. A promotion that silently failed to rewrite the tag
   is a red build, not a cluster that keeps running the old image while a green
   checkmark says otherwise.
+- **No signing key exists.** Keyless means the identity is the workflow: GitHub
+  hands the run an OIDC token, Fulcio turns it into a certificate valid for
+  minutes whose subject is `…/.github/workflows/ci.yml@refs/heads/main`, and that
+  subject -- not a key file -- is what `config-repo`'s ClusterPolicy requires. The
+  consequence to know about: the signature is stored in GHCR as an OCI artifact
+  and recorded in Sigstore's public Rekor log, so the image digest and this
+  repository's identity are published.
 
 CI never runs `kubectl`. The only write it performs against a cluster is a commit
 to a git repository.

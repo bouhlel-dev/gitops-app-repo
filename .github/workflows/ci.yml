@@ -1,11 +1,13 @@
 name: ci
 
-# One pipeline, three guarantees:
+# One pipeline, four guarantees:
 #   1. lint and tests run inside the very base image that ships to production,
 #      so there is no "it passed on the runner" case;
 #   2. Trivy gates the *push*, not merely the deploy -- a vulnerable layer never
 #      becomes pullable;
-#   3. a version reaches a cluster only through a merged commit on config-repo.
+#   3. every image that reaches GHCR is signed by this workflow, and the signed
+#      identity is the workflow itself (see the sign and verify steps);
+#   4. a version reaches a cluster only through a merged commit on config-repo.
 #      Nothing here ever touches kubectl.
 
 on:
@@ -18,6 +20,12 @@ on:
 permissions:
   contents: read
   packages: write # push the image to GHCR
+  # id-token: write is what lets the runner ask GitHub for a signed OIDC
+  # token, and that token is what Sigstore's Fulcio turns into the short-lived
+  # certificate cosign attaches to the image. It is also the reason no signing
+  # key exists anywhere: the credential is minted per run, for ten minutes, and
+  # the identity it proves is "this file, this ref, this run".
+  id-token: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -97,6 +105,8 @@ jobs:
           echo "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}" >> "$GITHUB_ENV"
           echo "TRIVY_VERSION=${TRIVY_VERSION}" >> "$GITHUB_ENV"
           echo "TRIVY_SHA256_LINUX=${TRIVY_SHA256_LINUX}" >> "$GITHUB_ENV"
+          echo "COSIGN_VERSION=${COSIGN_VERSION}" >> "$GITHUB_ENV"
+          echo "COSIGN_SHA256_LINUX=${COSIGN_SHA256_LINUX}" >> "$GITHUB_ENV"
           echo "KUSTOMIZE_VERSION=${KUSTOMIZE_VERSION}" >> "$GITHUB_ENV"
           echo "KUSTOMIZE_SHA256_LINUX=${KUSTOMIZE_SHA256_LINUX}" >> "$GITHUB_ENV"
 
@@ -109,6 +119,15 @@ jobs:
           tar -xzf /tmp/trivy.tgz -C /tmp trivy
           # awk, not head: under pipefail a SIGPIPE from head -1 fails the step.
           /tmp/trivy --version | awk 'NR==1'
+
+      - name: Install pinned cosign
+        run: |
+          set -euo pipefail
+          url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          curl --fail --silent --show-error --location --proto "=https" -o /tmp/cosign "$url"
+          echo "${COSIGN_SHA256_LINUX}  /tmp/cosign" | sha256sum --check --status
+          chmod +x /tmp/cosign
+          /tmp/cosign version | awk 'NR==1'
 
       - name: Build the image
         run: |
@@ -146,6 +165,43 @@ jobs:
           docker push "${IMAGE}:${GIT_SHA}"
           echo "### Published" >> "$GITHUB_STEP_SUMMARY"
           echo "\`${IMAGE}@${GIT_SHA}\` tagged \`${GIT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign the image (keyless -- the workflow is the identity)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          # The digest, never the tag. A tag can be re-pointed at a different
+          # image after signing, and the signature would then describe whatever
+          # the name happens to mean that week. RepoDigests is only filled in by
+          # the push above, which is why this step cannot move earlier.
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GIT_SHA}")"
+          echo "SIGNED_IMAGE=${digest}" >> "$GITHUB_ENV"
+          # --yes because a runner has nobody to answer a prompt. What is being
+          # signed with is the OIDC token the runner was handed for this run: the
+          # certificate Fulcio issues is valid for minutes and its subject is
+          # this file at this ref. No signing key exists on any disk, in any
+          # secret, anywhere -- which is why there is nothing to rotate.
+          /tmp/cosign sign --yes "${digest}"
+
+      - name: Verify the signature the way the cluster will
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          # Reading it back is the part that matters. A signature nobody can
+          # fetch is indistinguishable from no signature to Kyverno, so a push
+          # that GHCR will not serve stops here instead of becoming a release
+          # that cannot schedule a pod.
+          /tmp/cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/ci\.yml@refs/heads/main$" \
+            "${SIGNED_IMAGE}" > /tmp/cosign-verify.json
+          # The identity printed here is the string the ClusterPolicy in
+          # config-repo matches on. If they ever disagree, the pods stop
+          # scheduling, and this line is where you notice.
+          grep -o '"identity": *"[^"]*"' /tmp/cosign-verify.json |
+            sed 's/^/  verified identity: /' ||
+            echo "  cosign accepted the signature but printed no identity field"
+          echo "- Signed and readable: \`${SIGNED_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Promote the tag into config-repo
         if: github.ref == 'refs/heads/main'
@@ -203,6 +259,7 @@ jobs:
             -m "release: gitops-demo ${GIT_SHA}" \
             -m "Image ${IMAGE}:${GIT_SHA}, built from
           ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}
+          Signed: ${SIGNED_IMAGE} (keyless, GitHub Actions OIDC).
           Canary: 10% -> 30% -> 60% -> 100%, analyzed on success rate and p95."
           # This push failed once with `remote: Internal Server Error` /
           # `[remote rejected] ... (Internal Server Error)` on a run that was
