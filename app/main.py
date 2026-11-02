@@ -16,6 +16,14 @@ from .settings import Settings
 # steady stream of internal 200s mask a bad release in the success-rate query.
 UNINSTRUMENTED_PATHS = frozenset({"/metrics"})
 
+# The bad-release demo (config-repo/scripts/demo-bad-release.sh) ships this as
+# 600.0 instead of 0.0. It is a code default, not a knob anyone is meant to
+# touch in a real deployment: no test measures time, no linter spots it and
+# Trivy has nothing to say about it, so CI publishes the regression happily and
+# the only thing in the chain that stops it is the p95 the canary is measured
+# on. That is the claim the demo is making, so the switch lives in the app.
+EXTRA_LATENCY_MS = 0.0
+
 
 def route_label(request: Request) -> str:
     """Route template if it matched, otherwise a single constant.
@@ -83,6 +91,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/items", dependencies=[Depends(inject_faults)])
     async def items(request: Request, response: Response) -> dict:
+        if EXTRA_LATENCY_MS:
+            await asyncio.sleep(EXTRA_LATENCY_MS / 1000)
         response.headers["X-App-Version"] = settings.version
         response.headers["X-Pod"] = settings.pod_name
         return {
