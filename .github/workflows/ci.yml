@@ -195,12 +195,13 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/ci\.yml@refs/heads/main$" \
             "${SIGNED_IMAGE}" > /tmp/cosign-verify.json
-          # The identity printed here is the string the ClusterPolicy in
-          # config-repo matches on. If they ever disagree, the pods stop
-          # scheduling, and this line is where you notice.
-          grep -o '"identity": *"[^"]*"' /tmp/cosign-verify.json |
-            sed 's/^/  verified identity: /' ||
-            echo "  cosign accepted the signature but printed no identity field"
+          # What cosign's payload actually reports is the digest it checked. The
+          # identity is not echoed -- matching it against
+          # --certificate-identity-regexp is what the exit code means, and a
+          # nonzero exit fails this step. Printing the digest is printing the
+          # thing the promotion in config-repo is about to name.
+          grep -o '"docker-manifest-digest": *"[^"]*"' /tmp/cosign-verify.json |
+            sed 's/^/  signature valid for /'
           echo "- Signed and readable: \`${SIGNED_IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Promote the tag into config-repo
