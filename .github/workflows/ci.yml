@@ -204,7 +204,22 @@ jobs:
             -m "Image ${IMAGE}:${GIT_SHA}, built from
           ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}
           Canary: 10% -> 30% -> 60% -> 100%, analyzed on success rate and p95."
-          git push -q --set-upstream origin "${branch}"
+          # This push failed once with `remote: Internal Server Error` /
+          # `[remote rejected] ... (Internal Server Error)` on a run that was
+          # otherwise perfect. A transient 500 from GitHub aborting a release is
+          # the worst failure mode in a pipeline: nothing is wrong, nothing is
+          # deployed, and the red checkmark blames the commit. Retry it.
+          for attempt in 1 2 3 4 5; do
+            if git push -q --set-upstream origin "${branch}"; then
+              break
+            fi
+            echo "push attempt ${attempt} failed; retrying"
+            sleep $((attempt * 3))
+            if [ "${attempt}" = 5 ]; then
+              echo "::error::could not push ${branch} to ${CONFIG_REPO}"
+              exit 1
+            fi
+          done
 
           # A PR created in the same second as the push can fail with "No commit
           # found for the head branch" while GitHub's refs propagate. Retry.
