@@ -177,5 +177,26 @@ gh pr list --repo bouhlel-dev/gitops-config-repo --state merged --limit 5
 curl -s -H 'Host: gitops-demo.local' http://127.0.0.1/ | grep -o '"version":"[^"]*"'
 ```
 
+The two signing checks, which are the ones that fail in interesting ways:
+
+```bash
+# CI signed the digest it pushed, and read it back inside the same run
+gh run view --repo bouhlel-dev/gitops-app-repo --log \
+  | grep -E "Pushing signature|signature valid for"
+
+# and the signature is readable from here, tied to one workflow + ref
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/bouhlel-dev/gitops-app-repo/[.]github/workflows/ci[.]yml@refs/heads/main$' \
+  ghcr.io/bouhlel-dev/gitops-demo:<git sha>
+```
+
+The regexp uses `[.]` rather than `\.` because Git Bash rewrites backslashes in
+argv on the way to `cosign.exe`, so `\.` arrives as `/.` and the match fails
+against a correct certificate. Same regex to Go either way. On a match cosign
+prints the digest and never the identity, so cosign's exit code *is* the identity
+check; ask for a deliberately wrong ref and the complaint names the subject the
+certificate really carries.
+
 That last one is the end of the chain: the version string in a live pod is the
 commit you pushed.
