@@ -22,7 +22,7 @@ UNINSTRUMENTED_PATHS = frozenset({"/metrics"})
 # Trivy has nothing to say about it, so CI publishes the regression happily and
 # the only thing in the chain that stops it is the p95 the canary is measured
 # on. That is the claim the demo is making, so the switch lives in the app.
-EXTRA_LATENCY_MS = 0.0
+EXTRA_LATENCY_MS = 600.0
 
 
 def route_label(request: Request) -> str:
