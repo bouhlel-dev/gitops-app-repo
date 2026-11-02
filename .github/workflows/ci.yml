@@ -156,6 +156,12 @@ jobs:
           tar -xzf /tmp/kustomize.tgz -C /tmp kustomize
 
           cd "${CONFIG_DIR}"
+          # actions/checkout leaves a repo-local http.https://github.com/.extraheader
+          # holding the built-in GITHUB_TOKEN, and that header wins over any
+          # credential helper -- so the push authenticates as github-actions[bot],
+          # which has no write access to a second repository. Drop it, then let gh
+          # install CONFIG_REPO_TOKEN as the credential instead.
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
           git config user.name "ci-promote"
           git config user.email "ci-promote@users.noreply.github.com"
           gh auth setup-git
