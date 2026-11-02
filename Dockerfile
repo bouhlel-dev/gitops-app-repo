@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
+# config-repo/versions.env holds the authoritative pin and CI passes it here;
+# this default only exists so `docker build .` works standalone.
+ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
+
 # ---- build: resolve and install dependencies into a venv ---------------------
-FROM python:3.12-slim-bookworm AS build
+FROM ${PYTHON_BASE_IMAGE} AS build
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -15,12 +19,18 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install -r requirements.txt
 
 # ---- runtime: no compiler, no pip cache, no source tooling -------------------
-FROM python:3.12-slim-bookworm AS runtime
+FROM ${PYTHON_BASE_IMAGE} AS runtime
 
+# ARG values reset at each FROM, so re-declare the ones this stage uses.
 ARG GIT_SHA=dev
+ARG PYTHON_BASE_IMAGE
+# CI passes $GITHUB_SERVER_URL/$GITHUB_REPOSITORY; locally pass
+# $(git config --get remote.origin.url). No handle is hardcoded in the repo.
+ARG REPO_URL=
 LABEL org.opencontainers.image.title="gitops-demo" \
-      org.opencontainers.image.source="https://github.com/OWNER/app-repo" \
-      org.opencontainers.image.revision="${GIT_SHA}"
+      org.opencontainers.image.source="${REPO_URL}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.base.name="${PYTHON_BASE_IMAGE}"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
