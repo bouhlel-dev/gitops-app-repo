@@ -145,7 +145,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION#v}_linux_amd64.tar.gz"
+          # The literal slash, exactly as the release API publishes it in
+          # browser_download_url. The %2F form works from a workstation but 404'd
+          # from a runner, so the canonical URL is the one to keep. Echoed first:
+          # a failed fetch should name the address it tried.
+          url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION#v}_linux_amd64.tar.gz"
+          echo "$url"
           curl --fail --silent --show-error --location --proto "=https" -o /tmp/kustomize.tgz "$url"
           echo "${KUSTOMIZE_SHA256_LINUX}  /tmp/kustomize.tgz" | sha256sum --check --status
           tar -xzf /tmp/kustomize.tgz -C /tmp kustomize
