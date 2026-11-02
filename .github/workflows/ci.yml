@@ -158,6 +158,23 @@ jobs:
           branch="release/${GIT_SHA}"
           git checkout -q -b "${branch}"
           (cd "${TAG_PATH}" && /tmp/kustomize edit set image "${IMAGE}:${GIT_SHA}")
+
+          # `kustomize edit set image` matches on the image *name*, not the line
+          # it rewrites. If the name in config-repo ever stops being this
+          # repository's image -- renamed owner, moved registry -- the edit
+          # silently appends a second entry and the pods keep the old tag, so CI
+          # would promote a manifest that still says "placeholder". Render both
+          # overlays and require the built tag to be the one actually shipped.
+          overlays="${TAG_PATH%/*}/overlays"
+          for overlay in dev prod; do
+            /tmp/kustomize build "${overlays}/${overlay}" > "/tmp/render-${overlay}.yaml"
+            if ! grep -qF "image: ${IMAGE}:${GIT_SHA}" "/tmp/render-${overlay}.yaml"; then
+              echo "::error::${overlays}/${overlay} does not ship ${IMAGE}:${GIT_SHA}"
+              echo "Fix the images block in ${TAG_PATH}/kustomization.yaml: its name must be exactly ${IMAGE}."
+              exit 1
+            fi
+          done
+
           git add "${TAG_PATH}/kustomization.yaml"
 
           # Re-running the same commit must not create a second, empty PR.
