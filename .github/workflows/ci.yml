@@ -79,6 +79,15 @@ jobs:
           repository: ${{ env.CONFIG_REPO }}
           ref: main
           path: ${{ env.CONFIG_DIR }}
+          # checkout writes this token into this clone's http.https://github.com/
+          # .extraheader, so every later git operation in the directory -- the
+          # branch push below -- authenticates as the PAT owner instead of the bot.
+          # Leaving it out is what caused the 403: the extraheader then held the
+          # built-in GITHUB_TOKEN, and deleting that header did not help either,
+          # because git falls back to the runner's GIT_ASKPASS, which vends the
+          # same built-in token. There is no way to win by removing credentials
+          # here; the PAT has to be the credential from the start.
+          token: ${{ secrets.CONFIG_REPO_TOKEN }}
 
       - name: Resolve pins and the image tag
         run: |
@@ -150,21 +159,17 @@ jobs:
           # and it only ever worked locally because the file came from the cache.
           # The literal slash is what GitHub publishes in browser_download_url.
           url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          echo "$url"
           curl --fail --silent --show-error --location --proto "=https" -o /tmp/kustomize.tgz "$url"
           echo "${KUSTOMIZE_SHA256_LINUX}  /tmp/kustomize.tgz" | sha256sum --check --status
           tar -xzf /tmp/kustomize.tgz -C /tmp kustomize
 
           cd "${CONFIG_DIR}"
-          # actions/checkout leaves a repo-local http.https://github.com/.extraheader
-          # holding the built-in GITHUB_TOKEN, and that header wins over any
-          # credential helper -- so the push authenticates as github-actions[bot],
-          # which has no write access to a second repository. Drop it, then let gh
-          # install CONFIG_REPO_TOKEN as the credential instead.
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
           git config user.name "ci-promote"
           git config user.email "ci-promote@users.noreply.github.com"
-          gh auth setup-git
+          # The checkout step installed CONFIG_REPO_TOKEN as this clone's
+          # credential, so plain `git push` is already authorised. Nothing here
+          # touches git's auth again -- see the comment on that step.
+          echo "promoting as $(gh api user --jq .login)"
 
           branch="release/${GIT_SHA}"
           git checkout -q -b "${branch}"
