@@ -5,6 +5,9 @@
 .venv
 __pycache__
 *.pyc
+# CI checks config-repo out beside the app to read versions.env. It must never
+# reach the build context.
+config-repo/
 tests/
 Dockerfile
 .dockerignore

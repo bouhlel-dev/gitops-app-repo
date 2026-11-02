@@ -1,0 +1,200 @@
+name: ci
+
+# One pipeline, three guarantees:
+#   1. lint and tests run inside the very base image that ships to production,
+#      so there is no "it passed on the runner" case;
+#   2. Trivy gates the *push*, not merely the deploy -- a vulnerable layer never
+#      becomes pullable;
+#   3. a version reaches a cluster only through a merged commit on config-repo.
+#      Nothing here ever touches kubectl.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # push the image to GHCR
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/gitops-demo
+  CONFIG_REPO: ${{ github.repository_owner }}/gitops-config-repo
+  CONFIG_DIR: config-repo
+  # The image tag lives in one place, in the base, so dev and prod always move
+  # together. Give each overlay its own `images:` block to version them apart.
+  TAG_PATH: apps/gitops-demo/base
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-24.04
+    steps:
+      # Pinned to the commit, not a mutable tag: a rewritten v7 tag would change
+      # what runs without anyone reviewing it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Tool and image pins are declared once, in config-repo, next to the
+      # desired state they belong to. Public repo, so no token is needed.
+      - name: Check out config-repo for the version pins
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.CONFIG_REPO }}
+          ref: main
+          path: ${{ env.CONFIG_DIR }}
+
+      - name: Ruff and pytest in the image's own base image
+        run: |
+          set -euo pipefail
+          set -a; source "${CONFIG_DIR}/versions.env"; set +a
+          # Only app/ and tests/ are linted. The workspace also holds the
+          # config-repo checkout above it, and that is not this repo's code.
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            "${PYTHON_BASE_IMAGE}" \
+            bash -euo pipefail -c '
+              python -V
+              pip install --quiet --no-cache-dir --disable-pip-version-check -r requirements-dev.txt
+              ruff format --check app tests
+              ruff check app tests
+              python -m pytest -q
+            '
+
+  deliver:
+    name: Build, scan, publish, promote
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out config-repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.CONFIG_REPO }}
+          ref: main
+          path: ${{ env.CONFIG_DIR }}
+
+      - name: Resolve pins and the image tag
+        run: |
+          set -euo pipefail
+          set -a; source "${CONFIG_DIR}/versions.env"; set +a
+          echo "GIT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE}" >> "$GITHUB_ENV"
+          echo "TRIVY_VERSION=${TRIVY_VERSION}" >> "$GITHUB_ENV"
+          echo "TRIVY_SHA256_LINUX=${TRIVY_SHA256_LINUX}" >> "$GITHUB_ENV"
+          echo "KUSTOMIZE_VERSION=${KUSTOMIZE_VERSION}" >> "$GITHUB_ENV"
+          echo "KUSTOMIZE_SHA256_LINUX=${KUSTOMIZE_SHA256_LINUX}" >> "$GITHUB_ENV"
+
+      - name: Install pinned Trivy
+        run: |
+          set -euo pipefail
+          url="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz"
+          curl --fail --silent --show-error --location --proto "=https" -o /tmp/trivy.tgz "$url"
+          echo "${TRIVY_SHA256_LINUX}  /tmp/trivy.tgz" | sha256sum --check --status
+          tar -xzf /tmp/trivy.tgz -C /tmp trivy
+          # awk, not head: under pipefail a SIGPIPE from head -1 fails the step.
+          /tmp/trivy --version | awk 'NR==1'
+
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE}" \
+            --build-arg GIT_SHA="${GIT_SHA}" \
+            --build-arg REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE}:${GIT_SHA}" \
+            .
+          docker images "${IMAGE}:${GIT_SHA}" --format '{{.Size}}'
+
+      - name: Scan the image (HIGH and CRITICAL block the push)
+        run: |
+          set -euo pipefail
+          # --ignore-unfixed drops findings that have no fix available yet: a gate
+          # you can only pass by waiting on Debian is a gate you will eventually
+          # switch off. Everything fixable still blocks the push. Run Trivy once
+          # without this flag to see the full list.
+          /tmp/trivy image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --no-progress \
+            --format table \
+            "${IMAGE}:${GIT_SHA}"
+
+      - name: Publish to GHCR
+        if: github.ref == 'refs/heads/main'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${IMAGE}:${GIT_SHA}"
+          echo "### Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${IMAGE}@${GIT_SHA}\` tagged \`${GIT_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Promote the tag into config-repo
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.CONFIG_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION#v}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --proto "=https" -o /tmp/kustomize.tgz "$url"
+          echo "${KUSTOMIZE_SHA256_LINUX}  /tmp/kustomize.tgz" | sha256sum --check --status
+          tar -xzf /tmp/kustomize.tgz -C /tmp kustomize
+
+          cd "${CONFIG_DIR}"
+          git config user.name "ci-promote"
+          git config user.email "ci-promote@users.noreply.github.com"
+          gh auth setup-git
+
+          branch="release/${GIT_SHA}"
+          git checkout -q -b "${branch}"
+          (cd "${TAG_PATH}" && /tmp/kustomize edit set image "${IMAGE}:${GIT_SHA}")
+          git add "${TAG_PATH}/kustomization.yaml"
+
+          # Re-running the same commit must not create a second, empty PR.
+          if git diff --cached --quiet; then
+            echo "config-repo already carries ${GIT_SHA}; nothing to promote."
+            exit 0
+          fi
+
+          git commit -q \
+            -m "release: gitops-demo ${GIT_SHA}" \
+            -m "Image ${IMAGE}:${GIT_SHA}, built from
+          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}
+          Canary: 10% -> 30% -> 60% -> 100%, analyzed on success rate and p95."
+          git push -q --set-upstream origin "${branch}"
+
+          # A PR created in the same second as the push can fail with "No commit
+          # found for the head branch" while GitHub's refs propagate. Retry.
+          pr=""
+          for attempt in 1 2 3 4 5; do
+            if pr=$(gh pr create --repo "${CONFIG_REPO}" --base main --head "${branch}" \
+              --title "release: gitops-demo ${GIT_SHA}" \
+              --body "Automated promotion from \`${{ github.repository }}@${GITHUB_SHA}\`.
+          Argo CD syncs this commit; Argo Rollouts runs the canary and the
+          Prometheus analysis, and aborts on its own if the release is bad." 2>&1); then
+              break
+            fi
+            echo "pr create attempt ${attempt} failed: ${pr}"
+            pr=""
+            sleep $((attempt * 3))
+          done
+          if [ -z "${pr}" ]; then
+            echo "::error::could not open the promotion PR on ${CONFIG_REPO}"
+            exit 1
+          fi
+
+          # Auto-merge keeps the good-release demo hands-free. Drop this step and
+          # review the PR yourself to make prod promotion an explicit decision.
+          gh pr merge --repo "${CONFIG_REPO}" --squash "${pr}"
+          echo "Promoted via ${pr}"
+          echo "- Promoted by [PR ${pr##*/}](${pr})" >> "$GITHUB_STEP_SUMMARY"
