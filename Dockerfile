@@ -2,7 +2,7 @@
 
 # config-repo/versions.env holds the authoritative pin and CI passes it here;
 # this default only exists so `docker build .` works standalone.
-ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
+ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 
 # ---- build: resolve and install dependencies into a venv ---------------------
 FROM ${PYTHON_BASE_IMAGE} AS build
